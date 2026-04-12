@@ -9,7 +9,7 @@ from aiogram.filters import Command
 import edge_tts
 from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, AudioFileClip
 
-# Настройка логов для Streamlit Cloud
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
 # --- ЧТЕНИЕ КЛЮЧЕЙ ---
@@ -22,28 +22,29 @@ dp = Dispatcher()
 FONT_PATH = "font.ttf"
 RESULT_FILE = "tiktok_result.mp4"
 
+# Список бесплатных моделей для перебора (Fallbacks)
+FREE_MODELS = [
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-7b-instruct:free",
+    "qwen/qwen-2-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free"
+]
+
 async def generate_voice(text):
-    logging.info(f"Начинаю озвучку текста: {text[:30]}...")
+    logging.info("Генерация озвучки...")
     communicate = edge_tts.Communicate(text, "ru-RU-DmitryNeural")
     await communicate.save("voice.mp3")
 
 def get_random_background():
-    if not os.path.exists("backgrounds"):
-        os.makedirs("backgrounds")
-        raise Exception("Папка backgrounds не найдена. Создал её. Загрузи туда mp4!")
-    
     files = [f for f in os.listdir("backgrounds") if f.lower().endswith(('.mp4', '.mov'))]
     if not files:
-        raise Exception("В папке backgrounds нет видео-файлов!")
-    
-    selected = os.path.join("backgrounds", random.choice(files))
-    logging.info(f"Выбран фон: {selected}")
-    return selected
+        raise Exception("Папка backgrounds пуста!")
+    return os.path.join("backgrounds", random.choice(files))
 
 def build_video(script):
-    logging.info("Старт монтажа MoviePy...")
     if not os.path.exists(FONT_PATH):
-        raise Exception(f"Шрифт не найден по пути: {FONT_PATH}. Проверь название файла на GitHub!")
+        raise Exception("Файл font.ttf не найден в корне проекта!")
 
     audio = AudioFileClip("voice.mp3")
     random_bg = get_random_background()
@@ -55,6 +56,7 @@ def build_video(script):
         start_time = random.uniform(0, max(0, full_bg.duration - audio.duration - 1))
         video = full_bg.subclip(start_time, start_time + audio.duration).set_audio(audio)
     
+    # Текст на экране (TikTok стиль)
     words = script.split()
     word_clips = [video]
     duration_per_word = audio.duration / len(words)
@@ -62,86 +64,76 @@ def build_video(script):
     group_size = 2
     for i in range(0, len(words), group_size):
         chunk = " ".join(words[i:i+group_size]).upper()
-        
         txt = TextClip(
-            chunk,
-            fontsize=85,
-            color='yellow',
-            font=FONT_PATH,
-            stroke_color='black',
-            stroke_width=2,
-            method='caption',
+            chunk, fontsize=85, color='yellow', font=FONT_PATH,
+            stroke_color='black', stroke_width=2, method='caption',
             size=(video.w * 0.8, None)
         ).set_start(i * duration_per_word).set_duration(duration_per_word * group_size).set_position('center')
-        
         word_clips.append(txt)
 
     final = CompositeVideoClip(word_clips)
-    final.write_videofile(
-        RESULT_FILE, 
-        fps=24, 
-        codec="libx264", 
-        audio_codec="aac", 
-        temp_audiofile='temp-audio.m4a', 
-        remove_temp=True
-    )
+    final.write_videofile(RESULT_FILE, fps=24, codec="libx264", audio_codec="aac", remove_temp=True)
     return RESULT_FILE
+
+async def get_ai_script(topic):
+    """Пытается получить сценарий, перебирая модели если одна не работает"""
+    prompt = f"Напиши один короткий шокирующий факт на тему: {topic}. На 15 секунд. Только текст факта, без вступлений."
+    
+    for model in FREE_MODELS:
+        try:
+            logging.info(f"Пробую модель: {model}")
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OR_KEY}"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                timeout=15
+            )
+            data = response.json()
+            if 'choices' in data:
+                return data['choices'][0]['message']['content']
+            else:
+                logging.warning(f"Модель {model} выдала ошибку: {data.get('error')}")
+        except Exception as e:
+            logging.error(f"Ошибка при запросе к {model}: {e}")
+        
+        await asyncio.sleep(1) # Короткая пауза перед следующей моделью
+    
+    return None
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("🎬 **PIXPAX РЕЖИССЕР ЗАПУЩЕН**\nНапиши тему, и я сделаю видео!")
+    await message.answer("🎬 **PIXPAX ULTRA-BOT**\nПришли тему — я подберу живую модель ИИ и сделаю видео!")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
-    status = await message.answer("🧠 **Шаг 1:** Запрос к ИИ...")
-    logging.info(f"Пользователь запросил тему: {message.text}")
+    status = await message.answer("🧠 **Шаг 1:** Ищу свободную нейросеть...")
     
-    prompt = f"Напиши один шокирующий факт на тему: {message.text}. На 15 секунд. Только текст."
+    script = await get_ai_script(message.text)
     
-    try:
-        response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OR_KEY}"},
-            json={
-                "model": "google/gemini-2.0-flash-exp:free", 
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30
-        )
-        
-        data = response.json()
+    if not script:
+        await status.edit_text("❌ Все бесплатные нейросети сейчас перегружены. Попробуй через минуту!")
+        return
 
-        if 'error' in data:
-            await status.edit_text(f"❌ Ошибка OpenRouter: {data['error'].get('message')}")
-            return
-            
-        script = data['choices'][0]['message']['content']
-        
-        await status.edit_text("🎙 **Шаг 2:** Озвучка...")
+    try:
+        await status.edit_text("🎙 **Шаг 2:** Озвучка текста...")
         await generate_voice(script)
         
-        await status.edit_text("🎞 **Шаг 3:** Монтаж (рендер)...")
+        await status.edit_text("🎞 **Шаг 3:** Монтаж видео...")
         video_path = build_video(script)
         
-        caption = f"🔥 {message.text}\n\n#AI #нейросети #pixpax"
-        
-        await message.answer_video(
-            video=types.FSFile(video_path),
-            caption=f"✅ Готово!\n\n`{caption}`",
-            parse_mode="Markdown"
-        )
+        caption = f"🔥 {message.text}\n\n#AI #нейросети #факты"
+        await message.answer_video(video=types.FSFile(video_path), caption=f"✅ Готово!\n\n`{caption}`", parse_mode="Markdown")
+        await status.delete()
         
     except Exception as e:
-        logging.error(f"ОШИБКА: {str(e)}")
-        await message.answer(f"❌ Произошла ошибка:\n`{str(e)}`", parse_mode="Markdown")
+        await message.answer(f"❌ Ошибка: `{str(e)}`", parse_mode="Markdown")
 
 async def main():
-    logging.info("Бот начинает опрос (polling)...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
     if "run" not in st.session_state:
         st.session_state.run = True
-        st.write("🤖 Видео-бот работает. Проверь Telegram!")
+        st.write("🤖 Бот запущен. Если OpenRouter капризничает, я переключу модель сам!")
         asyncio.run(main())
