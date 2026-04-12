@@ -1,5 +1,6 @@
-aiogram==3.4.1
-streamlit
+aiogram
 requests
-moviepy==1.0.3
+streamlit
 edge-tts
+moviepy
+Pillow
