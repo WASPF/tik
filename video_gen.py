@@ -6,9 +6,9 @@ import random
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import FSFile # Импортируем напрямую
 import edge_tts
 
+# Импорт MoviePy (дружит со всеми версиями)
 try:
     from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip, AudioFileClip
 except ImportError:
@@ -100,8 +100,10 @@ async def handle_request(message: types.Message):
         await status.edit_text("🎞 Шаг 3: Рендер...")
         video_path = build_video(script)
         
-        # ОТПРАВКА ВИДЕО: используем FSFile напрямую
-        await message.answer_video(video=FSFile(video_path), caption="✅ Готово!")
+        # УНИВЕРСАЛЬНАЯ ОТПРАВКА (работает на aiogram 2 и 3)
+        with open(video_path, 'rb') as video_file:
+            await message.answer_video(video=types.BufferedInputFile(video_file.read(), filename="video.mp4"), caption="✅ Готово!")
+            
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
     finally:
@@ -115,4 +117,5 @@ async def main():
 if __name__ == "__main__":
     if "run" not in st.session_state:
         st.session_state.run = True
+        st.write("🤖 Бот запущен!")
         asyncio.run(main())
