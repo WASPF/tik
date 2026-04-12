@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 import edge_tts
 
-# Продвинутый импорт MoviePy (дружит со всеми версиями)
+# Исправленные импорты MoviePy
 try:
     from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip, AudioFileClip
 except ImportError:
@@ -19,9 +19,10 @@ except ImportError:
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Ключи из Secrets
+# Чтение ключей из Streamlit Secrets
 TOKEN = st.secrets.get("VIDEO_BOT_TOKEN")
 OR_KEY = st.secrets.get("OPENROUTER_API_KEY")
 
@@ -32,7 +33,7 @@ FONT_PATH = "font.ttf"
 RESULT_FILE = "tiktok_result.mp4"
 
 def create_text_image(text, fontsize, color, font_path, video_w):
-    """Создает PNG с текстом (замена ImageMagick)"""
+    """Генерация PNG с текстом через Pillow"""
     img_w = int(video_w * 0.9)
     img_h = 300
     img = Image.new('RGBA', (img_w, img_h), (255, 255, 255, 0))
@@ -43,30 +44,31 @@ def create_text_image(text, fontsize, color, font_path, video_w):
     except:
         font = ImageFont.load_default()
 
-    # Рисуем черную обводку для читаемости
-    shadow_color = (0, 0, 0, 255)
+    # Рисуем черную обводку
+    shadow = (0, 0, 0, 255)
     for offset in [(-3,-3), (3,-3), (-3,3), (3,3)]:
-        draw.text(((img_w//2)+offset[0], (img_h//2)+offset[1]), text, font=font, fill=shadow_color, anchor="mm")
+        draw.text(((img_w//2)+offset[0], (img_h//2)+offset[1]), text, font=font, fill=shadow, anchor="mm")
     
-    # Основной текст (желтый)
+    # Основной текст
     draw.text((img_w//2, img_h//2), text, font=font, fill=color, anchor="mm")
     
-    temp_name = f"txt_{random.randint(1000, 9999)}.png"
+    temp_name = f"tmp_{random.randint(1000, 9999)}.png"
     img.save(temp_name)
     return temp_name
 
 def build_video(script):
-    logging.info("Начинаю сборку видео...")
+    logging.info("Сборка видео началась...")
     audio = AudioFileClip("voice.mp3")
     
-    # Берем случайный фон из папки backgrounds
+    # Случайный фон
     bg_folder = "backgrounds"
     files = [f for f in os.listdir(bg_folder) if f.lower().endswith(('.mp4', '.mov'))]
-    random_bg = os.path.join(bg_folder, random.choice(files))
+    if not files:
+        raise Exception("Папка backgrounds пуста!")
+        
+    video = VideoFileClip(os.path.join(bg_folder, random.choice(files)))
     
-    video = VideoFileClip(random_bg)
-    
-    # Подгоняем длительность
+    # Длительность
     if video.duration < audio.duration:
         video = video.loop(duration=audio.duration)
     else:
@@ -75,7 +77,7 @@ def build_video(script):
     
     video = video.set_audio(audio)
     
-    # Разбиваем текст на куски по 2 слова
+    # Субтитры
     words = script.split()
     clips = [video]
     duration_per_word = audio.duration / len(words)
@@ -83,40 +85,42 @@ def build_video(script):
     
     for i in range(0, len(words), group_size):
         chunk = " ".join(words[i:i+group_size]).upper()
+        img_p = create_text_image(chunk, 65, 'yellow', FONT_PATH, video.w)
         
-        # Создаем картинку с текстом
-        img_path = create_text_image(chunk, 65, 'yellow', FONT_PATH, video.w)
-        
-        txt_clip = (ImageClip(img_path)
+        txt_clip = (ImageClip(img_p)
                     .set_start(i * duration_per_word)
                     .set_duration(duration_per_word * group_size)
                     .set_position(('center', video.h * 0.45)))
-        
         clips.append(txt_clip)
 
     final = CompositeVideoClip(clips)
     final.write_videofile(RESULT_FILE, fps=24, codec="libx264", audio_codec="aac", logger=None)
     
-    # Чистим временные PNG
+    # Удаление временных картинок
     for f in os.listdir("."):
-        if f.startswith("txt_") and f.endswith(".png"):
+        if f.startswith("tmp_") and f.endswith(".png"):
             os.remove(f)
             
     return RESULT_FILE
 
 async def get_ai_script(topic):
-    prompt = f"Напиши один короткий шокирующий факт на тему: {topic}. На 10-15 секунд озвучки. Только текст факта."
     try:
         response = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {OR_KEY}", "HTTP-Referer": "https://streamlit.io"},
-            json={"model": "openrouter/auto", "messages": [{"role": "user", "content": prompt}]},
+            json={
+                "model": "openrouter/auto", 
+                "messages": [{"role": "user", "content": f"Напиши один шокирующий факт на тему: {topic}. Коротко, на 10 сек."}]
+            },
             timeout=25
         )
         return response.json()['choices'][0]['message']['content']
-    except Exception as e:
-        logging.error(f"Ошибка ИИ: {e}")
+    except:
         return None
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("🎬 Бот запущен! Пришли тему.")
 
 @dp.message(F.text)
 async def handle_request(message: types.Message):
@@ -124,27 +128,27 @@ async def handle_request(message: types.Message):
     script = await get_ai_script(message.text)
     
     if not script:
-        await status.edit_text("❌ Ошибка ИИ (проверь ключ/баланс)")
+        await status.edit_text("❌ Ошибка ИИ")
         return
 
     try:
-        await status.edit_text("🎙 Озвучиваю...")
+        await status.edit_text("🎙 Озвучка...")
         communicate = edge_tts.Communicate(script, "ru-RU-DmitryNeural")
         await communicate.save("voice.mp3")
         
-        await status.edit_text("🎞 Рендерю (Pillow Mode)...")
+        await status.edit_text("🎞 Рендер видео...")
         video_path = build_video(script)
         
-        await message.answer_video(video=types.FSFile(video_path), caption="✅ Готово для TikTok!")
+        await message.answer_video(video=types.FSFile(video_path), caption="Готово!")
     except Exception as e:
-        await message.answer(f"❌ Ошибка рендера: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
     finally:
-        if os.path.exists("voice.mp3"): os.remove("voice.mp3")
         await status.delete()
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    # Исправление ошибки Runtime Error:
+    await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
     if "run" not in st.session_state:
